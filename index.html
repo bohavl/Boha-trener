@@ -328,6 +328,125 @@
   function saveBwIndex(bw) { return csSet("bw_index", JSON.stringify(bw.map(function (b) { return b.id; }))); }
   function saveBw(entry) { return csSet("bw:" + entry.id, JSON.stringify(entry)); }
   function deleteBwKey(id) { return csRemove("bw:" + id); }
+
+  // ---------- SAFE (additive/merge) index helpers — never blindly overwrite an index
+  // from possibly-incomplete in-memory state; always read-merge-write against the cloud. ----------
+  function safeIndexAdd(indexKey, id) {
+    return csGetItems([indexKey]).then(function (r) {
+      var arr = []; try { arr = r[indexKey] ? JSON.parse(r[indexKey]) : []; } catch (e) {}
+      if (arr.indexOf(id) === -1) arr.push(id);
+      return csSet(indexKey, JSON.stringify(arr));
+    });
+  }
+  function safeIndexRemove(indexKey, id) {
+    return csGetItems([indexKey]).then(function (r) {
+      var arr = []; try { arr = r[indexKey] ? JSON.parse(r[indexKey]) : []; } catch (e) {}
+      arr = arr.filter(function (x) { return x !== id; });
+      return csSet(indexKey, JSON.stringify(arr));
+    });
+  }
+  function unionArr(a, b) { var s = {}; (a || []).concat(b || []).forEach(function (x) { s[x] = true; }); return Object.keys(s); }
+  // additive save: merges dayIds with whatever is already on the server, never drops ids we don't know about locally
+  function saveProgramAdditive(p) {
+    return csGetItems(["prog:" + p.id]).then(function (r) {
+      var remote = null; try { remote = r["prog:" + p.id] ? JSON.parse(r["prog:" + p.id]) : null; } catch (e) {}
+      var merged = { id: p.id, name: p.name, dayIds: unionArr(remote ? remote.dayIds : [], p.dayIds) };
+      return saveProgram(merged);
+    });
+  }
+  // explicit removal of one dayId: removes just that id from whatever is on the server (keeps unknown remote ids intact)
+  function removeDayIdFromProgram(programId, dayId) {
+    return csGetItems(["prog:" + programId]).then(function (r) {
+      var remote = null; try { remote = r["prog:" + programId] ? JSON.parse(r["prog:" + programId]) : null; } catch (e) {}
+      if (!remote) return;
+      remote.dayIds = (remote.dayIds || []).filter(function (x) { return x !== dayId; });
+      return saveProgram(remote);
+    });
+  }
+  function csGetKeys() {
+    return new Promise(function (resolve) {
+      if (useCloud) {
+        var settled = false;
+        var timer = setTimeout(function () { if (!settled) { settled = true; resolve([]); } }, 6000);
+        try {
+          tg.CloudStorage.getKeys(function (err, keys) {
+            if (settled) return; settled = true; clearTimeout(timer);
+            resolve(err ? [] : (keys || []));
+          });
+        } catch (e) { if (!settled) { settled = true; clearTimeout(timer); resolve([]); } }
+      } else {
+        try { resolve(Object.keys(localStorage).filter(function (k) { return k.indexOf("mirror:") !== 0; })); } catch (e) { resolve([]); }
+      }
+    });
+  }
+  // self-heal: scans every key actually in storage and adds back anything orphaned
+  // (present as data but missing from an index) — recovers from any past index corruption.
+  function reconcileAll(loaded) {
+    return csGetKeys().then(function (keys) {
+      var progIds = keys.filter(function (k) { return k.indexOf("prog:") === 0; }).map(function (k) { return k.slice(5); });
+      var dayIds = keys.filter(function (k) { return k.indexOf("day:") === 0; }).map(function (k) { return k.slice(4); });
+      var logIds = keys.filter(function (k) { return k.indexOf("log:") === 0; }).map(function (k) { return k.slice(4); });
+      var bwIds = keys.filter(function (k) { return k.indexOf("bw:") === 0; }).map(function (k) { return k.slice(3); });
+
+      var knownProg = {}; loaded.programs.forEach(function (p) { knownProg[p.id] = true; });
+      var missingProg = progIds.filter(function (id) { return !knownProg[id]; });
+      var knownDay = {}; Object.keys(loaded.days).forEach(function (id) { knownDay[id] = true; });
+      var missingDay = dayIds.filter(function (id) { return !knownDay[id]; });
+      var knownLog = {}; loaded.logs.forEach(function (l) { knownLog[l.id] = true; });
+      var missingLog = logIds.filter(function (id) { return !knownLog[id]; });
+      var knownBw = {}; loaded.bw.forEach(function (b) { knownBw[b.id] = true; });
+      var missingBw = bwIds.filter(function (id) { return !knownBw[id]; });
+
+      if (!missingProg.length && !missingDay.length && !missingLog.length && !missingBw.length) {
+        return { changed: false, data: loaded };
+      }
+      var fetchKeys = missingProg.map(function (id) { return "prog:" + id; })
+        .concat(missingDay.map(function (id) { return "day:" + id; }))
+        .concat(missingLog.map(function (id) { return "log:" + id; }))
+        .concat(missingBw.map(function (id) { return "bw:" + id; }));
+
+      return csGetItems(fetchKeys).then(function (vals) {
+        var recoveredPrograms = loaded.programs.slice();
+        missingProg.forEach(function (id) { var v = vals["prog:" + id]; if (v) { try { recoveredPrograms.push(JSON.parse(v)); } catch (e) {} } });
+        var recoveredDays = Object.assign({}, loaded.days);
+        missingDay.forEach(function (id) { var v = vals["day:" + id]; if (v) { try { recoveredDays[id] = JSON.parse(v); } catch (e) {} } });
+        var recoveredLogs = loaded.logs.slice();
+        missingLog.forEach(function (id) { var v = vals["log:" + id]; if (v) { try { recoveredLogs.push(JSON.parse(v)); } catch (e) {} } });
+        var recoveredBw = loaded.bw.slice();
+        missingBw.forEach(function (id) { var v = vals["bw:" + id]; if (v) { try { recoveredBw.push(JSON.parse(v)); } catch (e) {} } });
+
+        recoveredPrograms.forEach(function (p) { p.dayIds = p.dayIds || []; });
+        var recoveryProgram = null;
+        Object.keys(recoveredDays).forEach(function (dayId) {
+          var d = recoveredDays[dayId];
+          var owner = recoveredPrograms.find(function (p) { return p.id === d.programId; });
+          if (!owner) {
+            if (!recoveryProgram) {
+              recoveryProgram = recoveredPrograms.find(function (p) { return p.id === "__recovered__"; });
+              if (!recoveryProgram) { recoveryProgram = { id: "__recovered__", name: "Відновлені дні", dayIds: [] }; recoveredPrograms.push(recoveryProgram); }
+            }
+            owner = recoveryProgram;
+          }
+          if (owner.dayIds.indexOf(dayId) === -1) owner.dayIds.push(dayId);
+        });
+        recoveredLogs.sort(function (a, b) { return new Date(b.date) - new Date(a.date); });
+
+        var saves = [];
+        recoveredPrograms.forEach(function (p) { saves.push(safeIndexAdd("programs_index", p.id)); saves.push(saveProgram(p)); });
+        recoveredLogs.forEach(function (l) { saves.push(safeIndexAdd("log_index", l.id)); });
+        recoveredBw.forEach(function (b) { saves.push(safeIndexAdd("bw_index", b.id)); });
+
+        return Promise.all(saves).then(function () {
+          return {
+            changed: true,
+            recoveredCount: missingProg.length + missingDay.length + missingLog.length + missingBw.length,
+            data: { programs: recoveredPrograms, days: recoveredDays, logs: recoveredLogs, activeSession: loaded.activeSession, bw: recoveredBw }
+          };
+        });
+      });
+    }).catch(function () { return { changed: false, data: loaded }; });
+  }
+
   function saveHistory(dayId, snapshot) {
     return csGetItems(["hist:" + dayId]).then(function (r) {
       var arr = r["hist:" + dayId] ? JSON.parse(r["hist:" + dayId]) : [];
@@ -405,7 +524,7 @@
     var p = currentProgram();
     if (!p) return html;
 
-    html += '<div class="section-label"><span>Назва програми</span><span><button class="btn-ghost" style="font-size:13px;margin-right:10px;" onclick="App.exportOpen()">Експорт</button><button class="btn-ghost" style="font-size:13px;" onclick="App.importOpen()">Імпорт</button></span></div>';
+    html += '<div class="section-label"><span>Назва програми</span><span><button class="btn-ghost" style="font-size:13px;margin-right:10px;" onclick="App.manualRecover()">Відновити</button><button class="btn-ghost" style="font-size:13px;margin-right:10px;" onclick="App.exportOpen()">Експорт</button><button class="btn-ghost" style="font-size:13px;" onclick="App.importOpen()">Імпорт</button></span></div>';
     html += '<div class="card" style="padding:2px 16px;display:flex;align-items:center;gap:8px;">';
     html += '<input value="' + esc(p.name) + '" placeholder="напр. Push Pull Legs" oninput="App.renameProgram(this.value)" style="flex:1;padding:14px 0;font-size:17px;font-weight:600;">';
     if (S.programs.length > 1) html += '<button class="icon-btn danger" title="Видалити програму" onclick="App.deleteProgram()">✕</button>';
@@ -935,12 +1054,12 @@
     addProgram: function () {
       var p = defaultProgram(S.programs.length + 1);
       S.programs.push(p); S.currentProgramId = p.id;
-      render(); saveProgramsIndex(S.programs); saveProgram(p);
+      render(); saveProgram(p); safeIndexAdd("programs_index", p.id);
     },
     selectProgram: function (id) { S.currentProgramId = id; render(); },
     renameProgram: function (val) {
       var p = currentProgram(); if (!p) return; p.name = val;
-      clearTimeout(App._pnTimer); App._pnTimer = setTimeout(function () { saveProgram(p); }, 500);
+      clearTimeout(App._pnTimer); App._pnTimer = setTimeout(function () { saveProgramAdditive(p); }, 500);
     },
     deleteProgram: function () {
       var p = currentProgram(); if (!p) return;
@@ -948,7 +1067,7 @@
       (p.dayIds || []).forEach(function (id) { delete S.days[id]; deleteDayKey(id); });
       S.programs = S.programs.filter(function (x) { return x.id !== p.id; });
       S.currentProgramId = S.programs.length ? S.programs[0].id : null;
-      render(); saveProgramsIndex(S.programs); deleteProgramKey(p.id);
+      render(); deleteProgramKey(p.id); safeIndexRemove("programs_index", p.id);
     },
 
     // days
@@ -957,7 +1076,7 @@
       var day = defaultDay((p.dayIds || []).length + 1, p.id);
       S.days[day.id] = day; p.dayIds = (p.dayIds || []).concat([day.id]);
       S.openDayId = day.id;
-      saveDay(day); saveProgram(p);
+      saveDay(day); saveProgramAdditive(p);
       App.enterEdit(day.id);
     },
     removeDay: function (id) {
@@ -965,7 +1084,7 @@
       var p = currentProgram(); if (!p) return;
       p.dayIds = p.dayIds.filter(function (x) { return x !== id; });
       delete S.days[id];
-      render(); saveProgram(p); deleteDayKey(id);
+      render(); deleteDayKey(id); removeDayIdFromProgram(p.id, id);
     },
     duplicateDay: function (id) {
       var p = currentProgram(); if (!p) return;
@@ -975,7 +1094,7 @@
       S.days[copy.id] = copy;
       var idx = p.dayIds.indexOf(id);
       p.dayIds.splice(idx + 1, 0, copy.id);
-      render(); saveDay(copy); saveProgram(p);
+      render(); saveDay(copy); saveProgramAdditive(p);
     },
     moveDay: function (id, dir) {
       var p = currentProgram(); if (!p) return;
@@ -1058,7 +1177,7 @@
       newDays.forEach(function (d) { S.days[d.id] = d; saveDay(d); });
       p.dayIds = newDays.map(function (d) { return d.id; });
       S.programs.push(p); S.currentProgramId = p.id;
-      saveProgramsIndex(S.programs); saveProgram(p);
+      saveProgram(p); safeIndexAdd("programs_index", p.id);
       S.importSheet = false; render();
       flash("Програму імпортовано");
     },
@@ -1133,7 +1252,7 @@
       S.activeSession = null; S.tab = "progress";
       if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
       render();
-      saveLog(cleaned); saveLogsIndex(S.logs); persistSession(null);
+      saveLog(cleaned); safeIndexAdd("log_index", cleaned.id); persistSession(null);
       flash("Тренування збережено");
     },
     pushUndo: function () { if (S.activeSession) { undoStack.push(JSON.stringify(S.activeSession)); if (undoStack.length > 10) undoStack.shift(); } },
@@ -1192,7 +1311,7 @@
     deleteLog: function (id) {
       if (!window.confirm("Видалити цей запис тренування?")) return;
       S.logs = S.logs.filter(function (l) { return l.id !== id; });
-      render(); deleteLogKey(id); saveLogsIndex(S.logs);
+      render(); deleteLogKey(id); safeIndexRemove("log_index", id);
     },
     togglePR: function (name) { S.openPRName = S.openPRName === name ? null : name; render(); },
 
@@ -1206,7 +1325,22 @@
       if (!val || val <= 0) return;
       var entry = { id: uid(), date: todayISO(), weight: val };
       S.bw.push(entry);
-      render(); saveBw(entry); saveBwIndex(S.bw);
+      render(); saveBw(entry); safeIndexAdd("bw_index", entry.id);
+    },
+
+    // manual recovery scan
+    manualRecover: function () {
+      flash("Скануємо сховище…");
+      reconcileAll({ programs: S.programs, days: S.days, logs: S.logs, activeSession: S.activeSession, bw: S.bw }).then(function (result) {
+        if (result.changed) {
+          S.programs = result.data.programs; S.days = result.data.days; S.logs = result.data.logs; S.bw = result.data.bw;
+          if (!S.currentProgramId && S.programs.length) S.currentProgramId = S.programs[0].id;
+          render();
+          flash("Відновлено елементів: " + result.recoveredCount);
+        } else {
+          flash("Нічого нового не знайдено — все вже на місці");
+        }
+      });
     }
   };
   window.App = App;
@@ -1217,11 +1351,18 @@
     bootDone = true;
     S.programs = data.programs || []; S.days = data.days || {}; S.logs = data.logs || [];
     S.activeSession = data.activeSession || null; S.bw = data.bw || [];
-    S.currentProgramId = S.programs.length ? S.programs[0].id : null;
+    if (!S.currentProgramId || !S.programs.some(function (p) { return p.id === S.currentProgramId; })) {
+      S.currentProgramId = S.programs.length ? S.programs[0].id : null;
+    }
     render();
   }
-  setTimeout(function () { if (!bootDone) { bootDone = true; render(); } }, 6500);
-  loadAll().then(applyLoaded).catch(function () { applyLoaded({}); });
+  setTimeout(function () { if (!bootDone) { applyLoaded({ programs: [], days: {}, logs: [], activeSession: null, bw: [] }); } }, 15000);
+  loadAll().then(function (data) {
+    return reconcileAll(data).then(function (result) {
+      applyLoaded(result.data);
+      if (result.changed) { setTimeout(function () { flash("Відновлено елементів зі сховища: " + result.recoveredCount); }, 250); }
+    });
+  }).catch(function () { applyLoaded({ programs: [], days: {}, logs: [], activeSession: null, bw: [] }); });
 })();
 </script>
 </body>
