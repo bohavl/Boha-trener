@@ -83,14 +83,36 @@
   function mirrorSet(key, value) { try { localStorage.setItem("mirror:" + key, value); } catch (e) {} }
   function mirrorGet(key) { try { return localStorage.getItem("mirror:" + key); } catch (e) { return null; } }
 
+  var CLOUD_TIMEOUT_MS = 4000;
+
   function csGetItems(keys) {
     return new Promise(function (resolve) {
       if (useCloud) {
-        tg.CloudStorage.getItems(keys, function (err, values) {
-          var out = err ? {} : (values || {});
-          keys.forEach(function (k) { if (!out[k]) { var m = mirrorGet(k); if (m !== null) out[k] = m; } });
+        var settled = false;
+        var timer = setTimeout(function () {
+          if (settled) return;
+          settled = true;
+          var out = {};
+          keys.forEach(function (k) { var m = mirrorGet(k); if (m !== null) out[k] = m; });
           resolve(out);
-        });
+        }, CLOUD_TIMEOUT_MS);
+        try {
+          tg.CloudStorage.getItems(keys, function (err, values) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            var out = err ? {} : (values || {});
+            keys.forEach(function (k) { if (!out[k]) { var m = mirrorGet(k); if (m !== null) out[k] = m; } });
+            resolve(out);
+          });
+        } catch (e) {
+          if (!settled) {
+            settled = true; clearTimeout(timer);
+            var out2 = {};
+            keys.forEach(function (k) { var m = mirrorGet(k); if (m !== null) out2[k] = m; });
+            resolve(out2);
+          }
+        }
       } else {
         var out = {};
         keys.forEach(function (k) { var v = localStorage.getItem(k); if (v !== null) out[k] = v; else { var m = mirrorGet(k); if (m !== null) out[k] = m; } });
@@ -101,15 +123,25 @@
   function csSet(key, value) {
     mirrorSet(key, value);
     return new Promise(function (resolve) {
-      if (useCloud) { tg.CloudStorage.setItem(key, value, function () { resolve(); }); }
-      else { try { localStorage.setItem(key, value); } catch (e) {} resolve(); }
+      if (useCloud) {
+        var settled = false;
+        var timer = setTimeout(function () { if (!settled) { settled = true; resolve(); } }, CLOUD_TIMEOUT_MS);
+        try {
+          tg.CloudStorage.setItem(key, value, function () { if (!settled) { settled = true; clearTimeout(timer); resolve(); } });
+        } catch (e) { if (!settled) { settled = true; clearTimeout(timer); resolve(); } }
+      } else { try { localStorage.setItem(key, value); } catch (e) {} resolve(); }
     });
   }
   function csRemove(key) {
     try { localStorage.removeItem("mirror:" + key); } catch (e) {}
     return new Promise(function (resolve) {
-      if (useCloud) { tg.CloudStorage.removeItem(key, function () { resolve(); }); }
-      else { try { localStorage.removeItem(key); } catch (e) {} resolve(); }
+      if (useCloud) {
+        var settled = false;
+        var timer = setTimeout(function () { if (!settled) { settled = true; resolve(); } }, CLOUD_TIMEOUT_MS);
+        try {
+          tg.CloudStorage.removeItem(key, function () { if (!settled) { settled = true; clearTimeout(timer); resolve(); } });
+        } catch (e) { if (!settled) { settled = true; clearTimeout(timer); resolve(); } }
+      } else { try { localStorage.removeItem(key); } catch (e) {} resolve(); }
     });
   }
 
@@ -1179,12 +1211,17 @@
   };
   window.App = App;
 
-  loadAll().then(function (data) {
-    S.programs = data.programs; S.days = data.days; S.logs = data.logs;
-    S.activeSession = data.activeSession; S.bw = data.bw;
+  var bootDone = false;
+  function applyLoaded(data) {
+    if (bootDone) return;
+    bootDone = true;
+    S.programs = data.programs || []; S.days = data.days || {}; S.logs = data.logs || [];
+    S.activeSession = data.activeSession || null; S.bw = data.bw || [];
     S.currentProgramId = S.programs.length ? S.programs[0].id : null;
     render();
-  }).catch(function () { render(); });
+  }
+  setTimeout(function () { if (!bootDone) { bootDone = true; render(); } }, 6500);
+  loadAll().then(applyLoaded).catch(function () { applyLoaded({}); });
 })();
 </script>
 </body>
