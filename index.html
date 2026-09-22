@@ -550,6 +550,7 @@
     else html += renderProgress();
     html += '</div>';
     if (S.picker) html += renderPickerSheet();
+    if (S.backdate) html += renderBackdateSheet();
     if (S.checkinPending) html += renderCheckinSheet();
     if (S.exportSheet) html += renderExportSheet();
     if (S.importSheet) html += renderImportSheet();
@@ -748,7 +749,7 @@
     html += '<div class="sheet">';
     html += '<div class="sheet-handle"></div>';
     html += '<div class="row" style="justify-content:space-between;margin-bottom:14px;">';
-    html += '<h2 style="font-size:20px;font-weight:700;margin:0;">' + ((S.picker.substituteIdx != null || S.picker.sessionSub != null) ? "Замінити вправу" : "Обрати вправу") + '</h2>';
+    html += '<h2 style="font-size:20px;font-weight:700;margin:0;">' + ((S.picker.substituteIdx != null || S.picker.sessionSub != null || S.picker.logSub != null) ? "Замінити вправу" : "Обрати вправу") + '</h2>';
     html += '<button class="icon-btn" onclick="App.closePicker()">✕</button></div>';
     html += '<input id="pickerSearchInput" class="search-input" placeholder="Пошук вправи..." oninput="App.pickerFilter(this.value)">';
     html += '<div style="display:flex;gap:6px;overflow-x:auto;margin-top:10px;">';
@@ -757,7 +758,7 @@
       html += '<button class="chip' + (S.picker.equip === eq ? ' active' : '') + '" onclick="App.pickerEquip(\'' + eq + '\')">' + eq + '</button>';
     });
     html += '</div>';
-    var initialSubName = (S.picker.substituteIdx != null) ? S.editDraft.exercises[S.picker.substituteIdx].name : (S.picker.sessionSub != null ? S.activeSession.exercises[S.picker.sessionSub].name : null);
+    var initialSubName = App.pickerCurrentSubName();
     html += '<div id="pickerResults" style="overflow-y:auto;margin-top:14px;flex:1;">' + (initialSubName != null ? renderPickerSubstituteSuggestions(initialSubName) : renderPickerCategories()) + '</div>';
     html += '</div></div>';
     return html;
@@ -998,6 +999,7 @@
     return html;
   }
   function renderProgress() {
+    if (S.logDraft) return renderLogEditor();
     var stats = computeStats();
     var statEntries = Object.keys(stats).filter(function (k) { return stats[k].best > 0; });
     var totalSessions = S.logs.length;
@@ -1099,6 +1101,7 @@
     }
 
     html += '<div class="section-label">Історія тренувань</div>';
+    html += '<button class="btn-secondary" style="margin-bottom:12px;" onclick="App.backdateOpen()">＋ Додати тренування заднім числом</button>';
     if (S.logs.length === 0) {
       html += '<div class="card-outline" style="padding:28px 20px;text-align:center;font-size:15px;color:var(--text-dim);">Ще немає записаних тренувань.</div>';
     } else {
@@ -1109,27 +1112,96 @@
         html += '<div class="card">';
         html += '<div class="list-row">';
         html += '<button style="color:var(--text-dim);" onclick="App.toggleLog(\'' + session.id + '\')">' + (isOpen ? '▾' : '▸') + '</button>';
-        html += '<div style="flex:1;"><p style="font-size:16px;font-weight:600;margin:0;">' + esc(session.dayName) + '</p><p class="tabular" style="font-size:13px;color:var(--text-dim);margin:2px 0 0;">' + formatDate(session.date) + " · об'єм " + vol + ' кг' + (session.checkin ? ' · енергія ' + session.checkin.energy + '/5' : '') + '</p></div>';
+        html += '<div style="flex:1;" onclick="App.toggleLog(\'' + session.id + '\')"><p style="font-size:16px;font-weight:600;margin:0;">' + esc(session.dayName) + (session.backdated ? ' <span class="badge">вписано пізніше</span>' : '') + '</p><p class="tabular" style="font-size:13px;color:var(--text-dim);margin:2px 0 0;">' + formatDate(session.date) + " · об'єм " + vol + ' кг' + (session.checkin ? ' · енергія ' + session.checkin.energy + '/5' : '') + '</p></div>';
+        html += '<button class="icon-btn accent" title="Редагувати" onclick="App.logEditOpen(\'' + session.id + '\')">✏️</button>';
         html += '<button class="icon-btn danger" title="Видалити" onclick="App.deleteLog(\'' + session.id + '\')">🗑</button></div>';
         if (isOpen) {
           html += '<div class="divider" style="padding:14px 16px;display:flex;flex-direction:column;gap:10px;">';
-          session.exercises.forEach(function (ex, exIdx) {
-            html += '<div><p style="font-size:14px;color:var(--text-dim);margin:0 0 6px;font-weight:500;">' + esc(ex.name) + '</p><div style="display:flex;flex-direction:column;gap:6px;">';
-            ex.sets.forEach(function (set, setIdx) {
-              html += '<div class="row" style="gap:8px;">';
-              html += '<input value="' + esc(set.weight) + '" inputmode="decimal" oninput="this.value=this.value.replace(/[^0-9.]/g,\'\');App.editLogSet(\'' + session.id + '\',' + exIdx + ',' + setIdx + ',\'weight\',this.value)" class="tabular field" style="width:64px;text-align:center;padding:6px;">';
-              html += '<span class="dim">×</span>';
-              html += '<input value="' + esc(set.reps) + '" inputmode="numeric" oninput="this.value=this.value.replace(/[^0-9]/g,\'\');App.editLogSet(\'' + session.id + '\',' + exIdx + ',' + setIdx + ',\'reps\',this.value)" class="tabular field" style="width:56px;text-align:center;padding:6px;">';
-              html += '</div>';
+          if (session.checkin && session.checkin.note) html += '<p class="dim" style="font-size:13px;margin:0;">📝 ' + esc(session.checkin.note) + '</p>';
+          session.exercises.forEach(function (ex) {
+            html += '<div><p style="font-size:14px;color:var(--text-dim);margin:0 0 6px;font-weight:500;">' + esc(ex.name) + '</p><div style="display:flex;flex-wrap:wrap;gap:8px;">';
+            ex.sets.forEach(function (set) {
+              html += '<span class="tabular" style="font-size:14px;background:var(--surface2);border-radius:8px;padding:6px 10px;">' + (set.type && set.type !== "normal" ? '<span class="dim" style="font-size:11px;">' + setTypeLabel(set.type) + ' </span>' : '') + (set.weight || 0) + 'кг × ' + (set.reps || 0) + (set.rpe ? ' <span class="dim">@' + esc(set.rpe) + '</span>' : '') + '</span>';
             });
             html += '</div></div>';
           });
+          html += '<button class="btn-ghost" style="text-align:left;" onclick="App.logEditOpen(\'' + session.id + '\')">✏️ Редагувати тренування</button>';
           html += '</div>';
         }
         html += '</div>';
       });
       html += '</div>';
     }
+    return html;
+  }
+
+  // ---------- PAST-WORKOUT EDITOR (edit a finished log, or create one retroactively) ----------
+  function isoToDateInput(iso) {
+    var d = new Date(iso);
+    var mm = d.getMonth() + 1, dd = d.getDate();
+    return d.getFullYear() + "-" + (mm < 10 ? "0" : "") + mm + "-" + (dd < 10 ? "0" : "") + dd;
+  }
+  function renderBackdateSheet() {
+    var b = S.backdate;
+    var html = '<div class="sheet-overlay" onclick="if(event.target===this)App.backdateClose()"><div class="sheet">';
+    html += '<div class="sheet-handle"></div>';
+    html += '<div class="row" style="justify-content:space-between;margin-bottom:14px;"><h2 style="font-size:20px;font-weight:700;margin:0;">Тренування заднім числом</h2><button class="icon-btn" onclick="App.backdateClose()">✕</button></div>';
+    html += '<div class="dim" style="font-size:13px;margin-bottom:6px;">Дата тренування</div>';
+    html += '<input type="date" class="field" value="' + esc(b.date) + '" max="' + isoToDateInput(todayISO()) + '" onchange="App.backdateDate(this.value)" style="margin-bottom:16px;color-scheme:dark;">';
+    html += '<div class="dim" style="font-size:13px;margin-bottom:6px;">Який день із плану ви робили?</div>';
+    html += '<div style="overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:8px;">';
+    var any = false;
+    S.programs.forEach(function (p) {
+      daysOfProgram(p).forEach(function (day) {
+        any = true;
+        html += '<button class="card list-row" style="width:100%;text-align:left;background:var(--surface2);" onclick="App.backdateStart(\'' + day.id + '\')">';
+        html += '<span style="flex:1;"><span style="display:block;font-size:16px;font-weight:600;">' + esc(day.name) + '</span><span class="dim" style="display:block;font-size:13px;">' + esc(p.name) + ' · ' + day.exercises.length + ' вправ</span></span><span style="color:var(--accent);">›</span></button>';
+      });
+    });
+    html += '<button class="card list-row" style="width:100%;text-align:left;background:var(--surface2);" onclick="App.backdateStart(null)"><span style="flex:1;font-size:16px;font-weight:600;">Порожнє тренування</span><span class="dim" style="font-size:13px;">додам вправи сам</span></button>';
+    html += '</div></div></div>';
+    return html;
+  }
+  function renderLogEditor() {
+    var d = S.logDraft;
+    var html = '';
+    html += '<div class="row" style="justify-content:space-between;margin-bottom:14px;">';
+    html += '<h2 style="font-size:22px;font-weight:700;margin:0;">' + (S.logDraftIsNew ? "Нове тренування" : "Редагування") + '</h2>';
+    html += '<button style="color:var(--text-dim);font-size:15px;" onclick="App.logEditCancel()">Скасувати</button></div>';
+
+    html += '<div class="card" style="padding:14px 16px;display:flex;flex-direction:column;gap:12px;margin-bottom:16px;">';
+    html += '<div><div class="dim" style="font-size:12px;margin-bottom:4px;">Назва</div><input class="field" value="' + esc(d.dayName) + '" oninput="App.logDraftField(\'dayName\',this.value)" style="font-size:16px;font-weight:600;"></div>';
+    html += '<div><div class="dim" style="font-size:12px;margin-bottom:4px;">Дата</div><input type="date" class="field" value="' + isoToDateInput(d.date) + '" max="' + isoToDateInput(todayISO()) + '" onchange="App.logDraftDate(this.value)" style="color-scheme:dark;"></div>';
+    html += '<div><div class="dim" style="font-size:12px;margin-bottom:4px;">Нотатка</div><input class="field" value="' + esc((d.checkin && d.checkin.note) || "") + '" placeholder="Самопочуття, сон, що завгодно" oninput="App.logDraftNote(this.value)"></div>';
+    html += '</div>';
+
+    html += '<div style="display:flex;flex-direction:column;gap:14px;">';
+    if (!d.exercises.length) html += '<div class="card-outline" style="padding:20px;text-align:center;font-size:14px;color:var(--text-dim);">Додайте вправи кнопкою нижче.</div>';
+    d.exercises.forEach(function (ex, exIdx) {
+      html += '<div class="card" style="padding:14px;">';
+      html += '<div class="row" style="justify-content:space-between;margin-bottom:8px;">';
+      html += '<h3 style="font-size:17px;font-weight:600;margin:0;flex:1;">' + esc(ex.name) + '</h3>';
+      html += '<button class="icon-btn" title="Замінити" onclick="App.openPicker(false,null,null,' + exIdx + ')">🔄</button>';
+      html += '<button class="icon-btn danger" title="Прибрати вправу" onclick="App.logDraftRemoveEx(' + exIdx + ')">✕</button>';
+      html += '</div>';
+      html += '<div style="display:grid;grid-template-columns:1.4fr 3fr 3fr 2.4fr 1.4fr;gap:6px;font-size:11px;color:var(--text-dim);padding:0 4px;margin-bottom:6px;"><span>тип</span><span>кг</span><span>повт.</span><span>RPE</span><span></span></div>';
+      html += '<div style="display:flex;flex-direction:column;gap:6px;">';
+      ex.sets.forEach(function (set, setIdx) {
+        html += '<div style="display:grid;grid-template-columns:1.4fr 3fr 3fr 2.4fr 1.4fr;gap:6px;align-items:center;border-radius:10px;padding:8px 6px;background:' + (set.type === "warmup" ? 'rgba(255,159,10,0.10)' : 'var(--surface2)') + ';">';
+        html += '<button class="badge" style="cursor:pointer;" onclick="App.logDraftCycleType(' + exIdx + ',' + setIdx + ')">' + setTypeLabel(set.type) + '</button>';
+        html += '<input value="' + esc(set.weight) + '" inputmode="decimal" placeholder="0" oninput="this.value=this.value.replace(/[^0-9.]/g,\'\');App.logDraftSet(' + exIdx + ',' + setIdx + ',\'weight\',this.value)" class="tabular" style="font-size:16px;font-weight:600;border-bottom:1.5px solid var(--border);width:100%;">';
+        html += '<input value="' + esc(set.reps) + '" inputmode="numeric" placeholder="0" oninput="this.value=this.value.replace(/[^0-9]/g,\'\');App.logDraftSet(' + exIdx + ',' + setIdx + ',\'reps\',this.value)" class="tabular" style="font-size:16px;font-weight:600;border-bottom:1.5px solid var(--border);width:100%;">';
+        html += '<input value="' + esc(set.rpe || "") + '" inputmode="numeric" placeholder="-" oninput="this.value=this.value.replace(/[^0-9]/g,\'\');App.logDraftSet(' + exIdx + ',' + setIdx + ',\'rpe\',this.value)" class="tabular" style="font-size:14px;border-bottom:1.5px solid var(--border);width:100%;">';
+        html += '<button class="icon-btn danger" onclick="App.logDraftRemoveSet(' + exIdx + ',' + setIdx + ')">✕</button>';
+        html += '</div>';
+      });
+      html += '</div>';
+      html += '<button style="margin-top:8px;color:var(--accent);font-size:15px;font-weight:500;" onclick="App.logDraftAddSet(' + exIdx + ')">+ Додати сет</button>';
+      html += '</div>';
+    });
+    html += '</div>';
+    html += '<button class="btn-secondary" style="margin-top:14px;" onclick="App.openPicker(false,null,null,null,true)">+ Додати вправу</button>';
+    html += '<button class="btn-primary" style="margin-top:14px;" onclick="App.logEditSave()">Зберегти тренування</button>';
     return html;
   }
   function renderMuscleBarChart(muscleVol) {
@@ -1332,8 +1404,14 @@
     },
 
     // picker
-    openPicker: function (substitute, exIdx, sessionExIdx) {
-      S.picker = { substituteIdx: substitute ? exIdx : null, sessionSub: (sessionExIdx != null ? sessionExIdx : null), equip: null };
+    openPicker: function (substitute, exIdx, sessionExIdx, logExIdx, logAdd) {
+      S.picker = {
+        substituteIdx: substitute ? exIdx : null,
+        sessionSub: (sessionExIdx != null ? sessionExIdx : null),
+        logSub: (logExIdx != null ? logExIdx : null),
+        logAdd: !!logAdd,
+        equip: null
+      };
       render();
     },
     closePicker: function () { S.picker = null; render(); },
@@ -1344,6 +1422,7 @@
     pickerCurrentSubName: function () {
       if (S.picker.substituteIdx != null) return S.editDraft.exercises[S.picker.substituteIdx].name;
       if (S.picker.sessionSub != null) return S.activeSession.exercises[S.picker.sessionSub].name;
+      if (S.picker.logSub != null && S.logDraft) return S.logDraft.exercises[S.picker.logSub].name;
       return null;
     },
     pickerFilter: function (value) {
@@ -1365,6 +1444,10 @@
       if (!S.picker) return;
       if (S.picker.substituteIdx != null) {
         S.editDraft.exercises[S.picker.substituteIdx].name = name;
+      } else if (S.picker.logSub != null && S.logDraft) {
+        S.logDraft.exercises[S.picker.logSub].name = name;
+      } else if (S.picker.logAdd && S.logDraft) {
+        S.logDraft.exercises.push({ exerciseId: uid(), name: name, targetReps: "", targetWeight: "", sets: [{ type: "normal", weight: "", reps: "", rpe: "", completed: true }] });
       } else if (S.picker.sessionSub != null) {
         S.activeSession.exercises[S.picker.sessionSub].name = name;
         persistSession(S.activeSession);
@@ -1461,6 +1544,88 @@
 
     // history log editing
     toggleLog: function (id) { S.openLogId = S.openLogId === id ? null : id; render(); },
+
+    // ----- backdated / past workout editing -----
+    backdateOpen: function () {
+      var y = new Date(); y.setDate(y.getDate() - 1);
+      S.backdate = { date: isoToDateInput(y.toISOString()) };
+      render();
+    },
+    backdateClose: function () { S.backdate = null; render(); },
+    backdateDate: function (val) { if (S.backdate) S.backdate.date = val; },
+    backdateStart: function (dayId) {
+      var dateVal = (S.backdate && S.backdate.date) || isoToDateInput(todayISO());
+      var parts = dateVal.split("-");
+      var dt = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10), 12, 0, 0);
+      var day = dayId ? S.days[dayId] : null;
+      S.logDraft = {
+        id: uid(), dayId: day ? day.id : null, dayName: day ? day.name : "Тренування", tags: day ? (day.tags || []).slice() : [],
+        date: dt.toISOString(), backdated: true, checkin: { energy: null, sleep: null, note: "" },
+        exercises: day ? day.exercises.map(function (ex) {
+          var n = Math.max(1, parseInt(ex.targetSets) || 1), sets = [];
+          for (var i = 0; i < n; i++) sets.push({ type: "normal", weight: ex.targetWeight || "", reps: "", rpe: "", completed: true });
+          return { exerciseId: ex.id, name: ex.name || "Вправа", linkNext: ex.linkNext, targetReps: ex.targetReps, targetWeight: ex.targetWeight, sets: sets };
+        }) : []
+      };
+      S.logDraftIsNew = true;
+      S.backdate = null; S.tab = "progress";
+      render(); window.scrollTo(0, 0);
+    },
+    logEditOpen: function (id) {
+      var log = S.logs.find(function (l) { return l.id === id; });
+      if (!log) return;
+      S.logDraft = JSON.parse(JSON.stringify(log));
+      if (!S.logDraft.checkin) S.logDraft.checkin = { energy: null, sleep: null, note: "" };
+      S.logDraftIsNew = false;
+      render(); window.scrollTo(0, 0);
+    },
+    logEditCancel: function () {
+      if (!window.confirm("Вийти без збереження змін?")) return;
+      S.logDraft = null; S.logDraftIsNew = false; render();
+    },
+    logDraftField: function (field, val) { if (S.logDraft) S.logDraft[field] = val; },
+    logDraftNote: function (val) { if (S.logDraft) S.logDraft.checkin.note = val; },
+    logDraftDate: function (val) {
+      if (!S.logDraft || !val) return;
+      var parts = val.split("-");
+      var old = new Date(S.logDraft.date);
+      var dt = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10), old.getHours() || 12, old.getMinutes() || 0, 0);
+      S.logDraft.date = dt.toISOString();
+    },
+    logDraftSet: function (exIdx, setIdx, field, val) { S.logDraft.exercises[exIdx].sets[setIdx][field] = val; },
+    logDraftCycleType: function (exIdx, setIdx) {
+      var order = ["normal", "warmup", "dropset", "restpause"];
+      var set = S.logDraft.exercises[exIdx].sets[setIdx];
+      set.type = order[(order.indexOf(set.type || "normal") + 1) % order.length];
+      render();
+    },
+    logDraftAddSet: function (exIdx) {
+      var sets = S.logDraft.exercises[exIdx].sets;
+      var last = sets[sets.length - 1];
+      sets.push({ type: "normal", weight: last ? last.weight : "", reps: last ? last.reps : "", rpe: "", completed: true });
+      render();
+    },
+    logDraftRemoveSet: function (exIdx, setIdx) { S.logDraft.exercises[exIdx].sets.splice(setIdx, 1); render(); },
+    logDraftRemoveEx: function (exIdx) {
+      if (!window.confirm("Прибрати цю вправу з тренування?")) return;
+      S.logDraft.exercises.splice(exIdx, 1); render();
+    },
+    logEditSave: function () {
+      var d = S.logDraft; if (!d) return;
+      d.exercises.forEach(function (ex) { ex.sets = ex.sets.filter(function (s) { return s.weight !== "" || s.reps !== ""; }); });
+      d.exercises = d.exercises.filter(function (ex) { return ex.sets.length > 0; });
+      if (!d.exercises.length) { window.alert("Додайте хоча б один сет з вагою або повтореннями."); return; }
+      if (!window.confirm(S.logDraftIsNew ? "Зберегти це тренування?" : "Зберегти зміни в тренуванні?")) return;
+      var saved = JSON.parse(JSON.stringify(d));
+      var idx = S.logs.findIndex(function (l) { return l.id === saved.id; });
+      if (idx === -1) S.logs.push(saved); else S.logs[idx] = saved;
+      S.logs.sort(function (a, b) { return new Date(b.date) - new Date(a.date); });
+      saveLog(saved);
+      if (S.logDraftIsNew) safeIndexAdd("log_index", saved.id);
+      S.logDraft = null; S.logDraftIsNew = false; S.openLogId = saved.id;
+      render();
+      flash("Тренування збережено");
+    },
     editLogSet: function (logId, exIdx, setIdx, field, val) {
       var log = S.logs.find(function (l) { return l.id === logId; });
       if (!log) return;
