@@ -653,7 +653,7 @@
     editDayId: null, editDraft: null, historyView: null,
     picker: null, checkinPending: null, exportSheet: false, importSheet: false,
     calMonth: new Date(), openPRName: null, justFinishedDayId: null,
-    ai: { settings: null, draft: { provider: "openai", apiKey: "", model: "" }, showSettings: false, scope: null, question: "", loading: false, result: null, refs: null, selected: {}, error: null }
+    ai: { settings: null, draft: { provider: "gemini", apiKey: "", model: "" }, showSettings: false, scope: null, question: "", loading: false, result: null, refs: null, selected: {}, error: null }
   };
   var undoStack = [];
   var root = document.getElementById("app");
@@ -1414,7 +1414,7 @@
   }
 
   // ================= AI ASSISTANT =================
-  var AI_DEFAULT_MODEL = { openai: "gpt-4o-mini", anthropic: "claude-haiku-4-5-20251001" };
+  var AI_DEFAULT_MODEL = { openai: "gpt-4o-mini", anthropic: "claude-haiku-4-5-20251001", gemini: "gemini-flash-latest" };
   var AI_SYSTEM = [
     "Ти — досвідчений тренер із силових тренувань. Аналізуєш журнал користувача і пропонуєш конкретні корекції плану на наступні тренування. Відповідай українською.",
     "Правила:",
@@ -1497,6 +1497,21 @@
         body: JSON.stringify({ model: model, max_tokens: 2000, system: system, messages: [{ role: "user", content: user }] })
       }).then(aiReadResponse).then(function (d) { return (d.content || []).map(function (c) { return c.text || ""; }).join(""); });
     }
+    if (st.provider === "gemini") {
+      return fetch("https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) + ":generateContent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": st.apiKey },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: system }] },
+          contents: [{ role: "user", parts: [{ text: user }] }],
+          generationConfig: { responseMimeType: "application/json", maxOutputTokens: 4096 }
+        })
+      }).then(aiReadResponse).then(function (d) {
+        var c = d.candidates && d.candidates[0];
+        if (!c || !c.content || !c.content.parts) throw new Error("bad json");
+        return c.content.parts.map(function (x) { return x.text || ""; }).join("");
+      });
+    }
     return fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + st.apiKey },
@@ -1513,8 +1528,8 @@
     return obj;
   }
   function aiErrorText(e) {
-    if (e && e.status === 401) return "Невірний API-ключ. Перевірте його в налаштуваннях.";
-    if (e && e.status === 429) return "Ліміт запитів або закінчились кошти на балансі API. Перевірте кабінет провайдера.";
+    if (e && (e.status === 401 || e.status === 403 || /api key/i.test(e.message || ""))) return "Невірний API-ключ. Перевірте його в налаштуваннях.";
+    if (e && e.status === 429) return "Ліміт запитів вичерпано (у безкоштовному Gemini це ліміт на хвилину/день) або закінчились кошти на балансі. Зачекайте трохи й спробуйте ще раз.";
     if (e && (e.status === 400 || e.status === 404)) return "Провайдер відхилив запит (" + e.message + "). Часто це неправильна назва моделі — перевірте її в налаштуваннях.";
     if (e && e.message === "bad json") return "AI відповів у неочікуваному форматі. Спробуйте ще раз.";
     return "Не вдалося зв'язатися з AI: " + ((e && e.message) || "невідома помилка") + ". Перевірте інтернет.";
@@ -1537,11 +1552,14 @@
   function renderAISettings() {
     var st = S.ai.draft;
     var html = '<div class="card" style="padding:14px 16px;display:flex;flex-direction:column;gap:12px;">';
-    html += '<div><div class="dim" style="font-size:12px;margin-bottom:6px;">Провайдер</div><div class="row" style="gap:8px;">';
-    html += '<button class="chip' + (st.provider === "openai" ? ' active' : '') + '" style="flex:1;" onclick="App.aiProvider(\'openai\')">ChatGPT (OpenAI)</button>';
-    html += '<button class="chip' + (st.provider === "anthropic" ? ' active' : '') + '" style="flex:1;" onclick="App.aiProvider(\'anthropic\')">Claude</button>';
-    html += '</div></div>';
-    html += '<div><div class="dim" style="font-size:12px;margin-bottom:4px;">API-ключ</div><input class="field" type="password" autocomplete="off" value="' + esc(st.apiKey || "") + '" placeholder="' + (st.provider === "anthropic" ? "sk-ant-..." : "sk-...") + '" oninput="App.aiDraft(\'apiKey\',this.value)"></div>';
+    html += '<div><div class="dim" style="font-size:12px;margin-bottom:6px;">Провайдер</div><div class="row" style="gap:6px;">';
+    html += '<button class="chip' + (st.provider === "gemini" ? ' active' : '') + '" style="flex:1;padding:10px 6px;" onclick="App.aiProvider(\'gemini\')">Gemini · безкоштовно</button>';
+    html += '<button class="chip' + (st.provider === "openai" ? ' active' : '') + '" style="flex:1;padding:10px 6px;" onclick="App.aiProvider(\'openai\')">ChatGPT</button>';
+    html += '<button class="chip' + (st.provider === "anthropic" ? ' active' : '') + '" style="flex:1;padding:10px 6px;" onclick="App.aiProvider(\'anthropic\')">Claude</button>';
+    html += '</div>';
+    if (st.provider === "gemini") html += '<div class="dim" style="font-size:12px;margin-top:8px;">Ключ безкоштовно: aistudio.google.com → Get API key (картка не потрібна). У безкоштовному тарифі Google може використовувати ваші запити для навчання моделей — тренування не чутливі дані, але про це варто знати. Є ліміти на хвилину й на добу.</div>';
+    html += '</div>';
+    html += '<div><div class="dim" style="font-size:12px;margin-bottom:4px;">API-ключ</div><input class="field" type="password" autocomplete="off" value="' + esc(st.apiKey || "") + '" placeholder="' + (st.provider === "anthropic" ? "sk-ant-..." : st.provider === "gemini" ? "AIza..." : "sk-...") + '" oninput="App.aiDraft(\'apiKey\',this.value)"></div>';
     html += '<div><div class="dim" style="font-size:12px;margin-bottom:4px;">Модель</div><input class="field" value="' + esc(st.model || "") + '" placeholder="' + AI_DEFAULT_MODEL[st.provider] + '" oninput="App.aiDraft(\'model\',this.value)"><div class="dim" style="font-size:11px;margin-top:4px;">Можна лишити порожнім. Якщо провайдер скаже, що модель не знайдена — впишіть актуальну назву з його документації.</div></div>';
     html += '<button class="btn-primary" onclick="App.aiSaveSettings()">Зберегти</button>';
     if (aiConfigured()) html += '<button class="btn-ghost" style="color:var(--danger);" onclick="App.aiRemoveKey()">Видалити ключ</button>';
@@ -1554,7 +1572,7 @@
     var ai = S.ai, html = "";
     if (!aiConfigured() || ai.showSettings) {
       html += '<div class="section-label">Підключення AI</div>';
-      if (!aiConfigured()) html += '<p class="dim" style="font-size:14px;margin:0 6px 12px;">Асистент аналізує ваш журнал і пропонує зміни до плану: ваги, повторення, заміни вправ. Для роботи потрібен власний API-ключ OpenAI або Anthropic.</p>';
+      if (!aiConfigured()) html += '<p class="dim" style="font-size:14px;margin:0 6px 12px;">Асистент аналізує ваш журнал і пропонує зміни до плану: ваги, повторення, заміни вправ. Для роботи потрібен власний API-ключ: Google Gemini (є безкоштовний тариф), OpenAI або Anthropic.</p>';
       html += renderAISettings();
       if (aiConfigured()) html += '<button class="btn-ghost" style="margin-top:10px;" onclick="App.aiToggleSettings()">‹ Назад до асистента</button>';
       return html;
