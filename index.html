@@ -652,8 +652,8 @@
     currentProgramId: null, openDayId: null, openLogId: null, note: "",
     editDayId: null, editDraft: null, historyView: null,
     picker: null, checkinPending: null, exportSheet: false, importSheet: false,
-    calMonth: new Date(), openPRName: null, justFinishedDayId: null,
-    ai: { settings: null, draft: { provider: "gemini", apiKey: "", model: "" }, showSettings: false, scope: null, question: "", loading: false, result: null, refs: null, selected: {}, error: null }
+    calMonth: new Date(), openPRName: null, justFinishedDayId: null, aiCopyText: null, aiCopied: false, aiPasteSheet: false,
+    ai: { mode: "manual", settings: null, draft: { provider: "gemini", apiKey: "", model: "" }, showSettings: false, scope: null, question: "", loading: false, result: null, refs: null, selected: {}, error: null }
   };
   var undoStack = [];
   var root = document.getElementById("app");
@@ -685,6 +685,8 @@
     if (S.checkinPending) html += renderCheckinSheet();
     if (S.exportSheet) html += renderExportSheet();
     if (S.importSheet) html += renderImportSheet();
+    if (S.aiCopyText) html += renderAICopySheet();
+    if (S.aiPasteSheet) html += renderAIPasteSheet();
     if (S.historyView) html += renderHistorySheet();
     root.innerHTML = html;
     manageTimerInterval();
@@ -1159,7 +1161,7 @@
     if (S.justFinishedDayId) {
       aiCard += '<div class="card" style="padding:14px 16px;margin-bottom:16px;display:flex;gap:10px;align-items:center;">';
       aiCard += '<div style="flex:1;"><div style="font-size:15px;font-weight:600;">🤖 Оновити план під ці результати?</div><div class="dim" style="font-size:13px;">AI підкаже ваги й повторення на наступне тренування.</div></div>';
-      aiCard += '<button class="chip active" onclick="App.aiAnalyzeDay(\'' + S.justFinishedDayId + '\')">' + (aiConfigured() ? "Аналіз" : "Налаштувати") + '</button>';
+      aiCard += '<button class="chip active" onclick="App.aiAnalyzeDay(\'' + S.justFinishedDayId + '\')">' + (aiConfigured() ? "Аналіз" : "До AI") + '</button>';
       aiCard += '<button class="icon-btn" onclick="App.dismissAICard()">✕</button></div>';
     }
     var statEntries = Object.keys(stats).filter(function (k) { return stats[k].best > 0; });
@@ -1431,7 +1433,7 @@
 
   function aiConfigured() { return !!(S.ai.settings && S.ai.settings.apiKey); }
 
-  function buildAIContext(scopeDayId) {
+  function buildAIContext(scopeDayId, full) {
     var refs = { days: {}, ex: {} }, lines = ["ПЛАН:"], dn = 0, en = 0;
     S.programs.forEach(function (p) {
       var days = daysOfProgram(p).filter(function (d) { return !scopeDayId || d.id === scopeDayId; });
@@ -1452,11 +1454,11 @@
       var own = logs.filter(function (l) { return l.dayId === scopeDayId || l.dayName === dayName; });
       if (own.length) logs = own;
     }
-    logs = logs.slice(0, scopeDayId ? 6 : 10);
-    lines.push("", "ОСТАННІ ТРЕНУВАННЯ (нові зверху):");
+    var totalLogs = logs.length; logs = logs.slice(0, full ? 80 : (scopeDayId ? 6 : 10));
+    lines.push("", "ОСТАННІ ТРЕНУВАННЯ (нові зверху" + (full ? ", показано " + logs.length + " з " + totalLogs : "") + "):");
     if (!logs.length) lines.push("немає записів");
     logs.forEach(function (l) {
-      var head = isoToDateInput(l.date) + " «" + l.dayName + "»";
+      var head = isoToDateInput(l.date) + " «" + l.dayName + "»" + ((l.tags && l.tags.length) ? " [" + l.tags.join(", ") + "]" : "");
       if (l.checkin) {
         if (l.checkin.energy) head += " енергія " + l.checkin.energy + "/5";
         if (l.checkin.sleep) head += " сон " + l.checkin.sleep + "/5";
@@ -1464,15 +1466,20 @@
       }
       lines.push(head);
       l.exercises.forEach(function (ex) {
-        var sets = ex.sets.filter(function (st) { return st.type !== "warmup"; }).slice(0, 8).map(function (st) {
+        var sets = ex.sets.filter(function (st) { return st.type !== "warmup"; }).slice(0, full ? 14 : 8).map(function (st) {
           return (st.weight || 0) + "x" + (st.reps || 0) + (st.rpe ? "@" + st.rpe : "") + (st.type && st.type !== "normal" ? "(" + setTypeLabel(st.type) + ")" : "");
         });
         if (sets.length) lines.push("  " + ex.name + ": " + sets.join(", "));
       });
     });
+    if (full) {
+      var st0 = computeStats(), prl = Object.keys(st0).filter(function (k) { return st0[k].best > 0; }).map(function (k) { return "  " + k + ": " + st0[k].best + "x" + st0[k].bestReps + " (~1ПМ " + st0[k].best1rm + ")"; });
+      if (prl.length) { lines.push("", "РЕКОРДИ (найважча вага x повторення, прикидний 1ПМ):"); prl.forEach(function (x) { lines.push(x); }); }
+    }
     if (S.bw.length) {
       var bw = S.bw.slice().sort(function (a, b) { return new Date(b.date) - new Date(a.date); });
-      lines.push("", "Вага тіла: " + bw[0].weight + " кг" + (bw[1] ? " (попередня " + bw[1].weight + ")" : ""));
+      if (full) lines.push("", "ВАГА ТІЛА (нові зверху): " + bw.slice(0, 12).map(function (b) { return isoToDateInput(b.date) + " " + b.weight; }).join(", "));
+      else lines.push("", "Вага тіла: " + bw[0].weight + " кг" + (bw[1] ? " (попередня " + bw[1].weight + ")" : ""));
     }
     return { text: lines.join("\n"), refs: refs, exCount: en };
   }
@@ -1519,12 +1526,35 @@
     }).then(aiReadResponse).then(function (d) { return d.choices && d.choices[0] && d.choices[0].message ? d.choices[0].message.content : ""; });
   }
   function parseAIJson(text) {
-    var t = String(text || "").replace(/```json|```/g, "");
-    var a = t.indexOf("{"), b = t.lastIndexOf("}");
-    if (a === -1 || b === -1) throw new Error("bad json");
-    var obj = JSON.parse(t.slice(a, b + 1));
+    var raw = String(text || ""), obj = null, prose = raw;
+    var blocks = [], re = /```(?:json)?\s*([\s\S]*?)```/gi, m;
+    while ((m = re.exec(raw)) !== null) blocks.push({ body: m[1], full: m[0] });
+    for (var i = blocks.length - 1; i >= 0 && !obj; i--) {
+      try { var o = JSON.parse(blocks[i].body); if (o && typeof o === "object") { obj = o; prose = raw.replace(blocks[i].full, ""); } } catch (e) {}
+    }
+    if (!obj) {
+      var a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+      if (a === -1 || b <= a) throw new Error("bad json");
+      obj = JSON.parse(raw.slice(a, b + 1)); prose = raw.slice(0, a);
+    }
+    if (Array.isArray(obj)) obj = { changes: obj };
     obj.insights = Array.isArray(obj.insights) ? obj.insights : [];
-    obj.changes = Array.isArray(obj.changes) ? obj.changes.slice(0, 12) : [];
+    obj.changes = Array.isArray(obj.changes) ? obj.changes.filter(function (c) { return c && typeof c === "object"; }).slice(0, 40) : [];
+    prose = prose.trim(); if (prose) obj.prose = prose.slice(0, 1500);
+    var np = obj.next_plan;
+    if (np && Array.isArray(np.days)) {
+      var days = np.days.slice(0, 10).map(function (d) {
+        return {
+          name: String((d && d.name) || "День"),
+          tags: (Array.isArray(d && d.tags) ? d.tags : []).filter(function (t) { return MUSCLE_TAGS.indexOf(t) !== -1; }),
+          deload: !!(d && d.deload),
+          exercises: (Array.isArray(d && d.exercises) ? d.exercises : []).slice(0, 25).filter(function (e) { return e && e.name; }).map(function (e) {
+            return { name: String(e.name), sets: String(parseInt(e.sets, 10) || 3), reps: String(e.reps || "8-12"), weight: (e.weight != null && e.weight !== "") ? cleanNum(e.weight) : "" };
+          })
+        };
+      }).filter(function (d) { return d.exercises.length; });
+      if (days.length) obj.next_plan = { name: String(np.name || "новий план"), days: days }; else delete obj.next_plan;
+    } else delete obj.next_plan;
     return obj;
   }
   function aiErrorText(e) {
@@ -1533,20 +1563,6 @@
     if (e && (e.status === 400 || e.status === 404)) return "Провайдер відхилив запит (" + e.message + "). Часто це неправильна назва моделі — перевірте її в налаштуваннях.";
     if (e && e.message === "bad json") return "AI відповів у неочікуваному форматі. Спробуйте ще раз.";
     return "Не вдалося зв'язатися з AI: " + ((e && e.message) || "невідома помилка") + ". Перевірте інтернет.";
-  }
-
-  function describeChange(c, refs) {
-    var er = c.ex ? refs.ex[c.ex] : null;
-    var dayId = (c.day && refs.days[c.day]) || (er && er.dayId);
-    var day = S.days[dayId];
-    var ex = (day && er) ? day.exercises.find(function (e) { return e.id === er.exId; }) : null;
-    var where = day ? day.name : "?";
-    var fmt = function (sets, reps, w) { return (sets || "?") + "×" + (reps || "?") + (w !== "" && w != null ? " @" + w + "кг" : ""); };
-    if (c.type === "update" && ex) return { ok: true, icon: "📈", title: ex.name, sub: where, detail: fmt(ex.targetSets, ex.targetReps, ex.targetWeight) + " → " + fmt(c.sets != null ? c.sets : ex.targetSets, c.reps != null ? c.reps : ex.targetReps, c.weight != null ? c.weight : ex.targetWeight) };
-    if (c.type === "replace" && ex && c.name) return { ok: true, icon: "🔄", title: ex.name + " → " + c.name, sub: where, detail: "" };
-    if (c.type === "add" && day && c.name) return { ok: true, icon: "➕", title: c.name, sub: where, detail: fmt(c.sets || 3, c.reps || "8-12", c.weight) };
-    if (c.type === "remove" && ex) return { ok: true, icon: "➖", title: "Прибрати: " + ex.name, sub: where, detail: "" };
-    return { ok: false, icon: "❔", title: "Незрозуміла пропозиція", sub: "", detail: "" };
   }
 
   function renderAISettings() {
@@ -1568,55 +1584,186 @@
     return html;
   }
 
-  function renderAI() {
+  function normName(x) { return String(x == null ? "" : x).toLowerCase().replace(/\s+/g, " ").trim(); }
+  // finds the day/exercise a change refers to: by D#/E# ref first, verified by name; falls back to name lookup
+  function resolveChange(c, refs) {
+    var day = null, ex = null;
+    var er = c.ex ? refs.ex[String(c.ex).toUpperCase()] : null;
+    if (er) { day = S.days[er.dayId] || null; ex = day ? (day.exercises.find(function (e) { return e.id === er.exId; }) || null) : null; }
+    if (ex && c.exName && normName(ex.name) !== normName(c.exName)) { ex = null; day = null; }
+    if (!ex && c.exName) {
+      Object.keys(S.days).some(function (id) {
+        var f = S.days[id].exercises.find(function (e) { return normName(e.name) === normName(c.exName); });
+        if (f) { ex = f; day = S.days[id]; return true; }
+        return false;
+      });
+    }
+    if (!day) {
+      var dref = c.day ? refs.days[String(c.day).toUpperCase()] : null;
+      if (dref) day = S.days[dref] || null;
+      if (!day && c.dayName) { Object.keys(S.days).some(function (id) { if (normName(S.days[id].name) === normName(c.dayName)) { day = S.days[id]; return true; } return false; }); }
+    }
+    return { day: day, ex: ex };
+  }
+  function cleanNum(v) { return String(v).replace(",", ".").replace(/[^0-9.]/g, ""); }
+
+  function describeChange(c, refs) {
+    var rs = resolveChange(c, refs), day = rs.day, ex = rs.ex;
+    var where = day ? day.name : "?";
+    var fmt = function (sets, reps, w) { return (sets || "?") + "×" + (reps || "?") + (w !== "" && w != null ? " @" + w + "кг" : ""); };
+    if (c.type === "update" && ex) return { ok: true, icon: "📈", title: ex.name, sub: where, detail: fmt(ex.targetSets, ex.targetReps, ex.targetWeight) + " → " + fmt(c.sets != null ? c.sets : ex.targetSets, c.reps != null ? c.reps : ex.targetReps, c.weight != null ? cleanNum(c.weight) : ex.targetWeight) };
+    if (c.type === "replace" && ex && c.name) return { ok: true, icon: "🔄", title: ex.name + " → " + c.name, sub: where, detail: "" };
+    if (c.type === "add" && day && c.name) return { ok: true, icon: "➕", title: c.name, sub: where, detail: fmt(c.sets || 3, c.reps || "8-12", c.weight != null ? cleanNum(c.weight) : "") };
+    if (c.type === "remove" && ex) return { ok: true, icon: "➖", title: "Прибрати: " + ex.name, sub: where, detail: "" };
+    return { ok: false, icon: "❔", title: "Не вдалося зіставити з планом", sub: (c.exName || c.name || c.ex || ""), detail: "" };
+  }
+
+  function buildManualExport() {
+    var ctx = buildAIContext(null, true);
+    var q = (S.ai.question || "").trim();
+    var example = {
+      summary: "2-4 речення загального аналізу",
+      answer: "відповідь на моє питання або порожній рядок",
+      insights: ["коротке спостереження"],
+      changes: [
+        { type: "update", ex: "E2", exName: "назва вправи з плану", sets: 4, reps: "6-8", weight: 102.5, reason: "чому" },
+        { type: "replace", ex: "E3", exName: "стара вправа", name: "нова вправа", reason: "чому" },
+        { type: "add", day: "D1", dayName: "назва дня", name: "нова вправа", sets: 3, reps: "10-12", weight: 20, reason: "чому" },
+        { type: "remove", ex: "E4", exName: "вправа", reason: "чому" }
+      ],
+      next_plan: { name: "назва програми", days: [{ name: "День 1", tags: ["Груди", "Плечі"], deload: false, exercises: [{ name: "Жим штанги лежачи", sets: 4, reps: "6-8", weight: 100 }] }] }
+    };
+    var names = EXFLAT.map(function (x) { return x.n; }).join("; ");
+    return [
+      "Ти — досвідчений тренер із силових тренувань. Нижче мій план і повний журнал тренувань із застосунку. Проаналізуй прогрес, застій, баланс м'язових груп, енергію та сон, і запропонуй, як змінити наступні тренування: конкретні ваги (кг), сети й повторення.",
+      "",
+      "Сьогодні: " + isoToDateInput(todayISO()),
+      q ? ("МОЯ ЦІЛЬ / ПИТАННЯ: " + q) : "МОЯ ЦІЛЬ / ПИТАННЯ: не вказано, дай загальний аналіз і корекції.",
+      "",
+      "ПРАВИЛА:",
+      "- Прогресуй обережно (подвійна прогресія): якщо в усіх робочих сетах досягнуто верхньої межі повторень і RPE ≤ 8 (або RPE не вказано) — додай вагу (+2.5 кг для базових вправ, +1–2 кг для ізолюючих). Інакше тримай вагу й цілься на більше повторень.",
+      "- Вправа стоїть 3+ тренування: зменш вагу на ~10%, зміни діапазон повторень або заміни на аналог того самого руху.",
+      "- Низька енергія або сон (≤2/5) у кількох останніх тренуваннях — не підвищуй навантаження, можна запропонувати полегшений тиждень.",
+      "- Якщо в нотатках є біль чи травма — не навантажуй цю зону і порадь звернутися до лікаря, діагнозів не став.",
+      "- Не міняй те, що працює. Якщо даних замало — скажи про це.",
+      "- Використовуй назви вправ із переліку в кінці, щоб застосунок їх розпізнав (інші назви теж можна).",
+      "",
+      "ФОРМАТ ВІДПОВІДІ: спочатку коротко поясни звичайним текстом, а в самому кінці дай ОДИН блок коду json у такій структурі (поле next_plan — необов'язкове: повний план на наступні тренування; changes — точкові зміни до мого поточного плану за посиланнями D#/E#, завжди вказуй ще й exName або dayName). Вага — число в кг, reps — рядок.",
+      JSON.stringify(example, null, 1),
+      "",
+      ctx.text,
+      "",
+      "ПЕРЕЛІК НАЗВ ВПРАВ ЗАСТОСУНКУ:",
+      names
+    ].join("\n");
+  }
+
+  function renderAIManual() {
+    var ai = S.ai;
+    var planDays = 0; S.programs.forEach(function (p) { planDays += daysOfProgram(p).length; });
+    var html = '<p class="dim" style="font-size:14px;margin:0 6px 12px;">Безкоштовно й без ключів: копіюєте дані → вставляєте в чат із Claude (або будь-яким AI) → вставляєте його відповідь сюди й застосовуєте зміни.</p>';
+    html += '<div class="section-label" style="margin-top:0;">Ваша ціль або питання (необов\'язково)</div>';
+    html += '<textarea class="field" style="min-height:70px;resize:vertical;font-size:15px;" placeholder="напр. «хочу більше спини, болить плече, ціль — жим 100 кг до грудня»" oninput="App.aiQuestion(this.value)">' + esc(ai.question) + '</textarea>';
+    html += '<button class="btn-primary" style="margin-top:12px;" onclick="App.aiCopyOpen()">1. Скопіювати дані для AI</button>';
+    html += '<p class="dim" style="font-size:12px;margin:6px 6px 14px;">У копію потрапить: ' + planDays + ' днів плану, ' + S.logs.length + ' тренувань (до 80 останніх), рекорди, вага тіла, самопочуття й нотатки, а також інструкція для AI.</p>';
+    html += '<button class="btn-secondary" onclick="App.aiPasteOpen()">2. Вставити відповідь AI</button>';
+    return html;
+  }
+
+  function renderAIApi() {
     var ai = S.ai, html = "";
     if (!aiConfigured() || ai.showSettings) {
-      html += '<div class="section-label">Підключення AI</div>';
-      if (!aiConfigured()) html += '<p class="dim" style="font-size:14px;margin:0 6px 12px;">Асистент аналізує ваш журнал і пропонує зміни до плану: ваги, повторення, заміни вправ. Для роботи потрібен власний API-ключ: Google Gemini (є безкоштовний тариф), OpenAI або Anthropic.</p>';
+      html += '<div class="section-label" style="margin-top:0;">Підключення AI</div>';
+      if (!aiConfigured()) html += '<p class="dim" style="font-size:14px;margin:0 6px 12px;">Автоматичний аналіз одним натисканням. Потрібен власний API-ключ: Google Gemini (є безкоштовний тариф), OpenAI або Anthropic.</p>';
       html += renderAISettings();
-      if (aiConfigured()) html += '<button class="btn-ghost" style="margin-top:10px;" onclick="App.aiToggleSettings()">‹ Назад до асистента</button>';
+      if (aiConfigured()) html += '<button class="btn-ghost" style="margin-top:10px;" onclick="App.aiToggleSettings()">‹ Назад</button>';
       return html;
     }
     var allDays = [];
     S.programs.forEach(function (p) { daysOfProgram(p).forEach(function (d) { allDays.push(d); }); });
     if (!allDays.length) return '<div class="card-outline" style="padding:28px 20px;text-align:center;font-size:15px;color:var(--text-dim);">Спочатку створіть план тренувань — асистенту треба що аналізувати.</div>';
-
-    html += '<div class="section-label"><span>Що аналізуємо</span><button class="btn-ghost" style="font-size:13px;" onclick="App.aiToggleSettings()">⚙︎ Налаштування</button></div>';
+    html += '<div class="section-label" style="margin-top:0;"><span>Що аналізуємо</span><button class="btn-ghost" style="font-size:13px;" onclick="App.aiToggleSettings()">⚙︎ Налаштування</button></div>';
     html += '<div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;">';
     html += '<button class="chip' + (!ai.scope ? ' active' : '') + '" onclick="App.aiScope(null)">Увесь план</button>';
     allDays.forEach(function (d) { html += '<button class="chip' + (ai.scope === d.id ? ' active' : '') + '" onclick="App.aiScope(\'' + d.id + '\')">' + esc(d.name) + '</button>'; });
     html += '</div>';
-    html += '<textarea class="field" style="margin-top:12px;min-height:70px;resize:vertical;font-size:15px;" placeholder="Питання (необов\'язково): напр. «чому стоїть жим?» або «хочу більше акценту на спину»" oninput="App.aiQuestion(this.value)">' + esc(ai.question) + '</textarea>';
+    html += '<textarea class="field" style="margin-top:12px;min-height:70px;resize:vertical;font-size:15px;" placeholder="Питання (необов\'язково): напр. «чому стоїть жим?»" oninput="App.aiQuestion(this.value)">' + esc(ai.question) + '</textarea>';
     html += '<button class="btn-primary" style="margin-top:12px;"' + (ai.loading ? ' disabled' : '') + ' onclick="App.aiRun()">' + (ai.loading ? "Аналізую…" : "🤖 Проаналізувати й запропонувати зміни") + '</button>';
-    if (!S.logs.length) html += '<p class="dim" style="font-size:13px;margin:8px 6px 0;">Записаних тренувань ще немає — поради будуть лише по структурі плану.</p>';
     if (ai.error) html += '<div class="card" style="padding:12px 14px;margin-top:14px;color:var(--danger);font-size:14px;">' + esc(ai.error) + '</div>';
+    return html;
+  }
 
-    var r = ai.result;
-    if (r) {
-      html += '<div class="section-label">Аналіз</div><div class="card" style="padding:14px 16px;display:flex;flex-direction:column;gap:10px;">';
-      if (r.summary) html += '<p style="margin:0;font-size:15px;">' + esc(r.summary) + '</p>';
-      if (r.answer) html += '<p style="margin:0;font-size:15px;"><b>Відповідь:</b> ' + esc(r.answer) + '</p>';
-      r.insights.forEach(function (t) { html += '<div class="row" style="gap:8px;align-items:flex-start;font-size:14px;"><span>•</span><span>' + esc(t) + '</span></div>'; });
+  function renderAIResult() {
+    var ai = S.ai, r = ai.result, html = "";
+    if (!r) return html;
+    html += '<div class="section-label">Аналіз</div><div class="card" style="padding:14px 16px;display:flex;flex-direction:column;gap:10px;">';
+    if (r.summary) html += '<p style="margin:0;font-size:15px;">' + esc(r.summary) + '</p>';
+    else if (r.prose) html += '<p style="margin:0;font-size:15px;white-space:pre-wrap;">' + esc(r.prose) + '</p>';
+    if (r.answer) html += '<p style="margin:0;font-size:15px;"><b>Відповідь:</b> ' + esc(r.answer) + '</p>';
+    r.insights.forEach(function (t) { html += '<div class="row" style="gap:8px;align-items:flex-start;font-size:14px;"><span>•</span><span>' + esc(t) + '</span></div>'; });
+    html += '</div>';
+    if (r.changes.length) {
+      html += '<div class="section-label">Зміни до поточного плану</div><div class="card">';
+      r.changes.forEach(function (c, i) {
+        var d = describeChange(c, ai.refs);
+        html += '<label class="list-row' + (i ? ' divider' : '') + '" style="align-items:flex-start;' + (!d.ok || c._applied ? 'opacity:.5;' : '') + '">';
+        html += '<input type="checkbox" style="width:20px;height:20px;margin-top:2px;flex-shrink:0;" ' + (ai.selected[i] && d.ok && !c._applied ? 'checked' : '') + (!d.ok || c._applied ? ' disabled' : '') + ' onchange="App.aiSelect(' + i + ',this.checked)">';
+        html += '<div style="flex:1;"><div style="font-size:15px;font-weight:600;">' + d.icon + ' ' + esc(d.title) + (c._applied ? ' <span class="badge">застосовано</span>' : '') + '</div>';
+        if (d.sub) html += '<div class="dim" style="font-size:12px;">' + esc(d.sub) + '</div>';
+        if (d.detail) html += '<div class="tabular" style="font-size:14px;margin-top:2px;">' + esc(d.detail) + '</div>';
+        if (c.reason) html += '<div class="dim" style="font-size:13px;margin-top:4px;">' + esc(c.reason) + '</div>';
+        html += '</div></label>';
+      });
       html += '</div>';
-      if (r.changes.length) {
-        html += '<div class="section-label">Пропоновані зміни до плану</div><div class="card">';
-        r.changes.forEach(function (c, i) {
-          var d = describeChange(c, ai.refs);
-          html += '<label class="list-row' + (i ? ' divider' : '') + '" style="align-items:flex-start;' + (!d.ok || c._applied ? 'opacity:.5;' : '') + '">';
-          html += '<input type="checkbox" style="width:20px;height:20px;margin-top:2px;flex-shrink:0;" ' + (ai.selected[i] && d.ok && !c._applied ? 'checked' : '') + (!d.ok || c._applied ? ' disabled' : '') + ' onchange="App.aiSelect(' + i + ',this.checked)">';
-          html += '<div style="flex:1;"><div style="font-size:15px;font-weight:600;">' + d.icon + ' ' + esc(d.title) + (c._applied ? ' <span class="badge">застосовано</span>' : '') + '</div>';
-          if (d.sub) html += '<div class="dim" style="font-size:12px;">' + esc(d.sub) + '</div>';
-          if (d.detail) html += '<div class="tabular" style="font-size:14px;margin-top:2px;">' + esc(d.detail) + '</div>';
-          if (c.reason) html += '<div class="dim" style="font-size:13px;margin-top:4px;">' + esc(c.reason) + '</div>';
-          html += '</div></label>';
+      html += '<button class="btn-primary" style="margin-top:12px;" onclick="App.aiApply()">Застосувати вибрані зміни</button>';
+      html += '<p class="dim" style="font-size:12px;margin:6px 6px 0;">Поточна версія кожного зміненого дня збережеться в «Історії» — можна відкотити.</p>';
+    }
+    var np = r.next_plan;
+    if (np) {
+      html += '<div class="section-label">Новий план на наступні тренування</div>';
+      html += '<div class="card" style="padding:14px 16px;"><div style="font-size:17px;font-weight:700;margin-bottom:8px;">' + esc(np.name) + '</div>';
+      np.days.forEach(function (d, di) {
+        html += '<div class="' + (di ? 'divider' : '') + '" style="padding:10px 0;"><div style="font-size:15px;font-weight:600;">' + esc(d.name) + (d.deload ? ' <span class="badge warn">Розвантаження</span>' : '') + '</div>';
+        if (d.tags.length) html += '<div class="dim" style="font-size:12px;margin-bottom:4px;">' + esc(d.tags.join(", ")) + '</div>';
+        d.exercises.forEach(function (e) {
+          html += '<div class="row" style="justify-content:space-between;font-size:14px;padding:2px 0;gap:10px;"><span>' + esc(e.name) + '</span><span class="tabular dim" style="white-space:nowrap;">' + esc(e.sets) + '×' + esc(e.reps) + (e.weight ? ' @' + esc(e.weight) + 'кг' : '') + '</span></div>';
         });
         html += '</div>';
-        html += '<button class="btn-primary" style="margin-top:12px;" onclick="App.aiApply()">Застосувати вибрані зміни</button>';
-        html += '<p class="dim" style="font-size:12px;margin:6px 6px 0;">Поточна версія кожного зміненого дня збережеться в «Історії» — можна відкотити.</p>';
-      } else {
-        html += '<p class="dim" style="font-size:14px;margin:10px 6px 0;">Змін до плану асистент не пропонує.</p>';
-      }
+      });
+      html += '</div>';
+      html += '<button class="btn-primary" style="margin-top:12px;"' + (np._created ? ' disabled' : '') + ' onclick="App.aiCreateProgram()">' + (np._created ? "✓ Програму створено" : "Створити з цього нову програму") + '</button>';
+      html += '<p class="dim" style="font-size:12px;margin:6px 6px 0;">Це нова програма у вкладці «План». Ваш поточний план не змінюється й не видаляється.</p>';
     }
+    return html;
+  }
+
+  function renderAI() {
+    var ai = S.ai, html = '<div class="segwrap" style="margin-bottom:16px;">';
+    html += '<button class="seg-btn' + (ai.mode === "manual" ? ' active' : '') + '" onclick="App.aiMode(\'manual\')">Через чат · безкоштовно</button>';
+    html += '<button class="seg-btn' + (ai.mode === "api" ? ' active' : '') + '" onclick="App.aiMode(\'api\')">Автоматично (API)</button></div>';
+    html += ai.mode === "api" ? renderAIApi() : renderAIManual();
+    html += renderAIResult();
+    return html;
+  }
+
+  function renderAICopySheet() {
+    var html = '<div class="sheet-overlay" onclick="if(event.target===this)App.aiCopyClose()"><div class="sheet">';
+    html += '<div class="sheet-handle"></div>';
+    html += '<div class="row" style="justify-content:space-between;margin-bottom:10px;"><h2 style="font-size:20px;font-weight:700;margin:0;">Дані для AI</h2><button class="icon-btn" onclick="App.aiCopyClose()">✕</button></div>';
+    html += '<p class="dim" style="font-size:13px;margin:0 0 8px;">Натисніть «Скопіювати», відкрийте чат із Claude, вставте й надішліть. Якщо копіювання не спрацює — затисніть текст, виберіть «Вибрати все» і скопіюйте вручну.</p>';
+    html += '<textarea class="mono" id="aiCopyText" readonly style="min-height:180px;flex:1;">' + esc(S.aiCopyText) + '</textarea>';
+    html += '<button class="btn-primary" style="margin-top:12px;" onclick="App.aiCopyDo()">' + (S.aiCopied ? "✓ Скопійовано" : "Скопіювати") + '</button>';
+    html += '</div></div>';
+    return html;
+  }
+  function renderAIPasteSheet() {
+    var html = '<div class="sheet-overlay" onclick="if(event.target===this)App.aiPasteClose()"><div class="sheet">';
+    html += '<div class="sheet-handle"></div>';
+    html += '<div class="row" style="justify-content:space-between;margin-bottom:10px;"><h2 style="font-size:20px;font-weight:700;margin:0;">Відповідь AI</h2><button class="icon-btn" onclick="App.aiPasteClose()">✕</button></div>';
+    html += '<p class="dim" style="font-size:13px;margin:0 0 8px;">Вставте всю відповідь AI (можна разом із поясненням — додаток сам знайде блок json).</p>';
+    html += '<textarea class="mono" id="aiPasteText" placeholder="Вставте відповідь сюди..." style="min-height:200px;flex:1;"></textarea>';
+    html += '<button class="btn-primary" style="margin-top:12px;" onclick="App.aiPasteParse()">Розібрати відповідь</button>';
+    html += '</div></div>';
     return html;
   }
 
@@ -1936,7 +2083,7 @@
     aiScope: function (dayId) { S.ai.scope = dayId; render(); },
     aiQuestion: function (v) { S.ai.question = v; },
     aiSelect: function (i, v) { S.ai.selected[i] = v; },
-    aiAnalyzeDay: function (dayId) { S.justFinishedDayId = null; S.tab = "ai"; S.ai.scope = dayId && S.days[dayId] ? dayId : null; App.aiRun(); },
+    aiAnalyzeDay: function (dayId) { S.justFinishedDayId = null; S.tab = "ai"; if (aiConfigured()) { S.ai.mode = "api"; S.ai.scope = dayId && S.days[dayId] ? dayId : null; App.aiRun(); } else { S.ai.mode = "manual"; render(); } },
     aiRun: function () {
       if (S.ai.loading || !aiConfigured()) { if (!aiConfigured()) { S.tab = "ai"; render(); } return; }
       var ctx = buildAIContext(S.ai.scope);
@@ -1949,6 +2096,45 @@
         res.changes.forEach(function (c, i) { S.ai.selected[i] = describeChange(c, ctx.refs).ok; });
       }).catch(function (e) { S.ai.error = aiErrorText(e); }).then(function () { S.ai.loading = false; render(); });
     },
+    aiMode: function (m) { S.ai.mode = m; render(); },
+    aiCopyOpen: function () { S.aiCopyText = buildManualExport(); S.aiCopied = false; render(); },
+    aiCopyClose: function () { S.aiCopyText = null; S.aiCopied = false; render(); },
+    aiCopyDo: function () {
+      var el = document.getElementById("aiCopyText"), text = S.aiCopyText || "", ok = false;
+      if (el) { try { el.focus(); el.select(); el.setSelectionRange(0, text.length); ok = document.execCommand("copy"); } catch (e) {} }
+      if (!ok) { try { navigator.clipboard.writeText(text); ok = true; } catch (e) {} }
+      S.aiCopied = true; render();
+    },
+    aiPasteOpen: function () { S.aiPasteSheet = true; render(); },
+    aiPasteClose: function () { S.aiPasteSheet = false; render(); },
+    aiPasteParse: function () {
+      var el = document.getElementById("aiPasteText"), text = el ? el.value : "";
+      if (!text.trim()) { window.alert("Спочатку вставте відповідь AI."); return; }
+      var res;
+      try { res = parseAIJson(text); } catch (e) { window.alert("Не вдалося знайти в тексті блок json. Напишіть AI: «поверни лише json у форматі, який я дав» і вставте ще раз."); return; }
+      var ctx = buildAIContext(null);
+      S.ai.result = res; S.ai.refs = ctx.refs; S.ai.selected = {}; S.ai.error = null;
+      res.changes.forEach(function (c, i) { S.ai.selected[i] = describeChange(c, ctx.refs).ok; });
+      S.aiPasteSheet = false; S.tab = "ai"; S.ai.mode = "manual";
+      render(); window.scrollTo(0, 0);
+    },
+    aiCreateProgram: function () {
+      var np = S.ai.result && S.ai.result.next_plan; if (!np || np._created) return;
+      var p = defaultProgram(S.programs.length + 1);
+      p.name = "AI: " + np.name;
+      var days = np.days.map(function (d) {
+        return {
+          id: uid(), programId: p.id, name: d.name, tags: d.tags.slice(), deload: !!d.deload,
+          exercises: d.exercises.map(function (e) { return { id: uid(), name: e.name, targetSets: String(e.sets), targetReps: String(e.reps), targetWeight: String(e.weight || ""), linkNext: false }; })
+        };
+      });
+      days.forEach(function (d) { S.days[d.id] = d; saveDay(d); });
+      p.dayIds = days.map(function (d) { return d.id; });
+      S.programs.push(p); S.currentProgramId = p.id;
+      saveProgram(p); safeIndexAdd("programs_index", p.id);
+      np._created = true; render();
+      flash("Програму створено — дивіться у вкладці «План»");
+    },
     aiApply: function () {
       var r = S.ai.result, refs = S.ai.refs; if (!r) return;
       var chosen = r.changes.filter(function (c, i) { return S.ai.selected[i] && !c._applied && describeChange(c, refs).ok; });
@@ -1956,15 +2142,13 @@
       if (!window.confirm("Застосувати " + chosen.length + " змін до плану?")) return;
       var before = {};
       chosen.forEach(function (c) {
-        var er = c.ex ? refs.ex[c.ex] : null;
-        var dayId = (c.day && refs.days[c.day]) || (er && er.dayId);
-        var day = S.days[dayId]; if (!day) return;
-        if (!before[dayId]) before[dayId] = JSON.parse(JSON.stringify(day));
-        var ex = er ? day.exercises.find(function (e) { return e.id === er.exId; }) : null;
+        var rs = resolveChange(c, refs), day = rs.day, ex = rs.ex;
+        if (!day) return;
+        if (!before[day.id]) before[day.id] = JSON.parse(JSON.stringify(day));
         var setNums = function (target) {
-          if (c.sets != null && c.sets !== "") target.targetSets = String(c.sets);
+          if (c.sets != null && c.sets !== "") target.targetSets = String(parseInt(c.sets, 10) || target.targetSets || "3");
           if (c.reps != null && c.reps !== "") target.targetReps = String(c.reps);
-          if (c.weight != null && c.weight !== "") target.targetWeight = String(c.weight);
+          if (c.weight != null && c.weight !== "") target.targetWeight = cleanNum(c.weight);
         };
         if (c.type === "update" && ex) setNums(ex);
         else if (c.type === "replace" && ex && c.name) { ex.name = String(c.name); setNums(ex); }
